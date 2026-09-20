@@ -30,13 +30,13 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Accept Android SDK licenses
         run: |
           yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || \
           yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || \
-          echo "Licenses already accepted or handled automatically — continuing"
+          echo "Licenses already accepted or handled automatically â€” continuing"
 
       - name: Install Capacitor packages
         run: |
@@ -84,13 +84,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: "Swarna Ledger — Latest build"
+          name: "Swarna Ledger â€” Latest build"
           body: |
             Automatically built from the latest code in this repository.
 
             **To install:** tap the .apk file below, download it, open it,
             then tap Install (you may need to allow "Install unknown apps"
-            for your browser the first time — Android will prompt you).
+            for your browser the first time â€” Android will prompt you).
           files: output/*.apk
           make_latest: true
         env:
