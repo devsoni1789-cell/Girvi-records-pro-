@@ -1,0 +1,8 @@
+{
+  "appId": "com.swarnaledger.app",
+  "appName": "Swarna Ledger",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  }
+}
