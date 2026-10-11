@@ -425,9 +425,15 @@ function daysBetween(iso1, iso2){
 function calendarDuration(startISO,endISO){
   if(!startISO||!endISO||endISO<startISO)return {months:0,days:0};
   const start=new Date(startISO+'T00:00:00'),end=new Date(endISO+'T00:00:00');
+  function addMonthsClamped(date,count){
+    const target=new Date(date.getFullYear(),date.getMonth()+count,1);
+    const lastDay=new Date(target.getFullYear(),target.getMonth()+1,0).getDate();
+    target.setDate(Math.min(date.getDate(),lastDay));
+    return target;
+  }
   let months=(end.getFullYear()-start.getFullYear())*12+(end.getMonth()-start.getMonth());
-  const anchor=new Date(start);anchor.setMonth(anchor.getMonth()+months);
-  if(anchor>end){months--;anchor.setTime(start.getTime());anchor.setMonth(anchor.getMonth()+months);}
+  let anchor=addMonthsClamped(start,months);
+  if(anchor>end){months--;anchor=addMonthsClamped(start,months);}
   const days=Math.max(0,Math.round((end-anchor)/86400000));
   return {months,days};
 }
