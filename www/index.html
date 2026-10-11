@@ -451,7 +451,10 @@ function computeLedger(cust,asOf){
   const events=[{type:'loan',amount:Number(cust.loanAmount)||0,date:cust.loanDate,note:'Loan issued',id:'loan'}];
   (cust.topups||[]).forEach(t=>events.push({type:'topup',amount:Number(t.amount)||0,date:t.date,note:t.note||'',id:t.id}));
   (cust.payments||[]).forEach(p=>events.push({type:'payment',amount:Number(p.amount)||0,date:p.date,note:p.note||'',id:p.id}));
-  const order={loan:0,topup:1,payment:2};events.sort((a,b)=>a.date.localeCompare(b.date)||order[a.type]-order[b.type]);
+  const order={loan:0,topup:1,payment:2};
+  const applicableEvents=events.filter(ev=>ev.date<=asOf);
+  applicableEvents.sort((a,b)=>a.date.localeCompare(b.date)||order[a.type]-order[b.type]);
+  events.length=0;events.push(...applicableEvents);
   let lots=[],carryInterest=0,lastDate=null;const rows=[];const rate=Math.max(0,Number(cust.rate)||0)/100;
   function accrueTo(date){lots.forEach(lot=>{const factor=interestFactor(lot.startDate,date,mode);const delta=Math.max(0,factor-lot.accruedFactor);if(delta>0&&lot.principal>0)carryInterest+=lot.principal*rate*delta;lot.accruedFactor=Math.max(lot.accruedFactor,factor);});}
   function principalTotal(){return lots.reduce((sum,lot)=>sum+lot.principal,0);}
