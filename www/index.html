@@ -252,12 +252,13 @@
   <section class="screen" id="screen-customers">
     <div class="content">
       <div class="search-sort">
-        <input type="text" id="searchInput" placeholder="Search name or item…">
+        <input type="text" id="searchInput" placeholder="Search name, phone, item, amount…">
         <select id="sortSelect">
           <option value="date_desc">Newest first</option>
           <option value="date_asc">Oldest first</option>
           <option value="name_asc">Name A–Z</option>
-          <option value="amount_desc">Amount high–low</option>
+          <option value="amount_desc">Original loan high–low</option>
+          <option value="balance_desc">Total due high–low</option>
         </select>
       </div>
       <div id="custList"></div>
@@ -319,6 +320,13 @@
         <input type="text" id="s_shopname" placeholder="Your shop name">
         <label>Default interest rate (% / month)</label>
         <input type="number" id="s_defaultrate" min="0" step="0.1">
+        <label>Interest calculation method</label>
+        <select id="s_interestmode">
+          <option value="started_months">First and last month count as full months</option>
+          <option value="first_full_then_accurate">First month full, remaining period accurate</option>
+          <option value="daily">Accurate daily interest (monthly rate ÷ 30 × days)</option>
+        </select>
+        <p class="helper">This setting applies to all customers. Existing loans are recalculated using the selected method.</p>
         <div class="btn-row"><button class="btn btn-primary" id="saveSettings">Save settings</button></div>
       </div>
       <div class="card">
@@ -333,10 +341,10 @@
       <div class="card">
         <div class="section-title">How interest is calculated</div>
         <p class="helper">
-          Interest is simple interest on the outstanding principal, charged per calendar month.
-          Every loan is charged at least 1 month's interest. The moment the date crosses into a
-          new calendar month, a full extra month is charged — days are never charged as a fraction
-          of a month. Partial payments first clear any interest due, then reduce the principal.
+          Payments first clear accrued interest, then reduce principal. Each top-up starts accruing from its own date.
+          “First and last month full” charges every calendar month touched. “First month full” charges one full month
+          once the loan has started, then uses actual elapsed time. “Daily” calculates monthly rate × days ÷ 30.
+          Interest is simple interest, not compound interest.
         </p>
       </div>
     </div>
@@ -372,7 +380,7 @@ const SETTINGS_KEY = 'swarna_ledger_settings_v1';
 
 let state = {
   customers: [],
-  settings: { shopName: 'My Loan Register', defaultRate: 2 },
+  settings: { shopName: 'My Loan Register', defaultRate: 2, interestMode: 'started_months' },
   currentScreen: 'home',
   currentCustomerId: null,
   editingCustomerId: null
@@ -420,69 +428,32 @@ function isSameDay(iso1, iso2){ return iso1 === iso2; }
 // - minimum 1 month interest always
 // - crossing into a new calendar month (even by a day) charges a full extra month
 // - no charge for zero elapsed time
-function monthsTouched(iso1, iso2){
-  if (iso2 <= iso1) return 0;
-  const d1 = new Date(iso1+'T00:00:00'), d2 = new Date(iso2+'T00:00:00');
-  const diff = (d2.getFullYear()-d1.getFullYear())*12 + (d2.getMonth()-d1.getMonth());
-  return diff + 1;
+function interestFactor(startISO,endISO,mode){
+  if(!startISO||!endISO||endISO<=startISO)return 0;
+  const days=daysBetween(startISO,endISO);
+  if(mode==='daily')return days/30;
+  if(mode==='first_full_then_accurate')return Math.max(1,days/30);
+  const s=new Date(startISO+'T00:00:00'),e=new Date(endISO+'T00:00:00');
+  return Math.max(1,(e.getFullYear()-s.getFullYear())*12+(e.getMonth()-s.getMonth())+1);
 }
-
-// Walks a customer's full transaction history and returns the current
-// ledger state: outstanding principal, interest due as of `asOf`, and
-// a normalized transaction list for display.
-function computeLedger(cust, asOf){
-  asOf = asOf || todayISO();
-  const events = [];
-  events.push({type:'loan', amount:cust.loanAmount, date:cust.loanDate, note:'Loan issued'});
-  (cust.topups||[]).forEach(t => events.push({type:'topup', amount:t.amount, date:t.date, note:t.note||''}));
-  (cust.payments||[]).forEach(p => events.push({type:'payment', amount:p.amount, date:p.date, note:p.note||''}));
-  events.sort((a,b) => a.date < b.date ? -1 : (a.date > b.date ? 1 : (a.type==='loan'?-1:0)));
-
-  let principal = 0;
-  let carryInterest = 0;
-  let lastDate = null;
-  const rows = [];
-
-  events.forEach(ev => {
-    if (lastDate !== null && ev.date > lastDate){
-      const months = monthsTouched(lastDate, ev.date);
-      const interestAccrued = principal * (cust.rate/100) * months;
-      carryInterest += interestAccrued;
-    }
-    lastDate = ev.date;
-    if (ev.type === 'loan' || ev.type === 'topup'){
-      principal += ev.amount;
-      rows.push({...ev, principalAfter: principal});
-    } else if (ev.type === 'payment'){
-      let pay = ev.amount;
-      let interestPaid = 0, principalPaid = 0;
-      if (pay <= carryInterest){
-        carryInterest -= pay;
-        interestPaid = pay;
-      } else {
-        interestPaid = carryInterest;
-        principalPaid = pay - carryInterest;
-        carryInterest = 0;
-        principal = Math.max(0, principal - principalPaid);
-      }
-      rows.push({...ev, interestPaid, principalPaid, principalAfter: principal});
-    }
+function computeLedger(cust,asOf){
+  asOf=asOf||todayISO();
+  const mode=state.settings.interestMode||'started_months';
+  const events=[{type:'loan',amount:Number(cust.loanAmount)||0,date:cust.loanDate,note:'Loan issued',id:'loan'}];
+  (cust.topups||[]).forEach(t=>events.push({type:'topup',amount:Number(t.amount)||0,date:t.date,note:t.note||'',id:t.id}));
+  (cust.payments||[]).forEach(p=>events.push({type:'payment',amount:Number(p.amount)||0,date:p.date,note:p.note||'',id:p.id}));
+  const order={loan:0,topup:1,payment:2};events.sort((a,b)=>a.date.localeCompare(b.date)||order[a.type]-order[b.type]);
+  let lots=[],carryInterest=0,lastDate=null;const rows=[];const rate=Math.max(0,Number(cust.rate)||0)/100;
+  function accrueTo(date){lots.forEach(lot=>{const factor=interestFactor(lot.startDate,date,mode);const delta=Math.max(0,factor-lot.accruedFactor);if(delta>0&&lot.principal>0)carryInterest+=lot.principal*rate*delta;lot.accruedFactor=Math.max(lot.accruedFactor,factor);});}
+  function principalTotal(){return lots.reduce((sum,lot)=>sum+lot.principal,0);}
+  function reducePrincipal(amount){let rem=amount;lots.sort((a,b)=>a.startDate.localeCompare(b.startDate));for(const lot of lots){if(rem<=0.000001)break;const n=Math.min(lot.principal,rem);lot.principal-=n;rem-=n;}lots=lots.filter(l=>l.principal>0.000001);return amount-rem;}
+  events.forEach(ev=>{if(lastDate!==null&&ev.date>lastDate)accrueTo(ev.date);lastDate=ev.date;
+    if(ev.type==='loan'||ev.type==='topup'){lots.push({principal:ev.amount,startDate:ev.date,accruedFactor:0});rows.push({...ev,principalAfter:principalTotal(),interestPaid:0,principalPaid:0});}
+    else{let payment=ev.amount;const interestPaid=Math.min(payment,carryInterest);carryInterest=Math.max(0,carryInterest-interestPaid);payment-=interestPaid;const principalPaid=reducePrincipal(payment);rows.push({...ev,interestPaid,principalPaid,principalAfter:principalTotal()});}
   });
-
-  // Accrue interest from last event to asOf date
-  let finalMonths = 0, interestSinceLast = 0;
-  if (lastDate !== null && asOf > lastDate && principal > 0){
-    finalMonths = monthsTouched(lastDate, asOf);
-    interestSinceLast = principal * (cust.rate/100) * finalMonths;
-  }
-  const totalInterestDue = carryInterest + interestSinceLast;
-  const totalPayable = principal + totalInterestDue;
-  const elapsedDays = daysBetween(cust.loanDate, asOf);
-
-  return {
-    rows, principal, totalInterestDue, totalPayable, elapsedDays,
-    lastEventDate: lastDate, finalMonths
-  };
+  if(lastDate!==null&&asOf>lastDate)accrueTo(asOf);
+  const principal=principalTotal(),totalInterestDue=Math.max(0,carryInterest);
+  return {rows,principal,totalInterestDue,totalPayable:principal+totalInterestDue,elapsedDays:Math.max(0,daysBetween(cust.loanDate,asOf)),lastEventDate:lastDate};
 }
 
 /* ---------- Navigation (with Android back-button handling) ---------- */
@@ -656,14 +627,21 @@ function escapeHtml(s){
 function renderCustomersList(){
   const q = document.getElementById('searchInput').value.trim().toLowerCase();
   const sortBy = document.getElementById('sortSelect').value;
-  let list = state.customers.filter(c =>
-    !q || c.name.toLowerCase().includes(q) || c.item.toLowerCase().includes(q)
-  );
+  let list = state.customers.filter(c => {
+    if (!q) return true;
+    const l = computeLedger(c);
+    const values = [c.name,c.phone,c.item,c.notes,c.status,c.loanAmount,l.principal,l.totalInterestDue,l.totalPayable,
+      ...(c.topups||[]).flatMap(t=>[t.amount,t.note,t.date]),...(c.payments||[]).flatMap(p=>[p.amount,p.note,p.date])];
+    const haystack=values.map(v=>String(v==null?'':v).toLowerCase()).join(' ');
+    const nq=q.replace(/[₹,\s]/g,'');
+    return haystack.includes(q)||haystack.replace(/[₹,\s]/g,'').includes(nq);
+  });
   list.sort((a,b) => {
     if (sortBy === 'date_desc') return b.loanDate.localeCompare(a.loanDate);
     if (sortBy === 'date_asc') return a.loanDate.localeCompare(b.loanDate);
     if (sortBy === 'name_asc') return a.name.localeCompare(b.name);
-    if (sortBy === 'amount_desc') return b.loanAmount - a.loanAmount;
+    if (sortBy === 'amount_desc') return (Number(b.loanAmount)||0) - (Number(a.loanAmount)||0);
+    if (sortBy === 'balance_desc') return computeLedger(b).totalPayable - computeLedger(a).totalPayable;
     return 0;
   });
   const listEl = document.getElementById('custList');
@@ -806,8 +784,8 @@ document.getElementById('custForm').addEventListener('submit', (e) => {
   const date = document.getElementById('f_date').value;
   const notes = document.getElementById('f_notes').value.trim();
 
-  if (!name || !item || isNaN(amount) || isNaN(rate) || !date){
-    showToast('Please fill all required fields');
+  if (!name || !item || !Number.isFinite(amount) || amount <= 0 || !Number.isFinite(rate) || rate < 0 || !date){
+    showToast('Enter a valid name, item, loan amount and interest rate');
     return;
   }
 
@@ -856,7 +834,7 @@ function openTopupModal(custId){
   openModal(`
     <h3>Add top-up</h3>
     <label>Top-up amount (₹)</label>
-    <input type="number" id="m_amount" min="0" step="1">
+    <input type="number" id="m_amount" min="0.01" step="0.01">
     <label>Date</label>
     <input type="date" id="m_date" value="${todayISO()}">
     <label>Note (optional)</label>
@@ -873,7 +851,7 @@ function openTopupModal(custId){
     const note = document.getElementById('m_note').value.trim();
     const c = state.customers.find(x => x.id === custId);
     if (!amount || amount <= 0 || !date){ showToast('Enter a valid amount and date'); return; }
-    if (date < c.loanDate){ showToast('Top-up date cannot be before the loan date'); return; }
+    if (date < c.loanDate || (c.topups||[]).some(t=>t.date>date) || (c.payments||[]).some(p=>p.date>date)){ showToast('Top-up date must not be before the loan or after a later transaction'); return; }
     c.topups = c.topups || [];
     c.topups.push({id: uid(), amount, date, note});
     saveCustomers();
@@ -890,7 +868,7 @@ function openPaymentModal(custId, isClose){
     <h3>${isClose ? 'Close loan — full settlement' : 'Record payment'}</h3>
     <div class="kv"><span class="k">Total payable today</span><span class="v money">${fmtMoney(l.totalPayable)}</span></div>
     <label>Payment amount (₹)</label>
-    <input type="number" id="m_amount" min="0" step="1" value="${isClose ? Math.round(l.totalPayable) : ''}">
+    <input type="number" id="m_amount" min="0.01" step="0.01" value="${isClose ? (Math.round(l.totalPayable*100)/100) : ''}">
     <label>Date</label>
     <input type="date" id="m_date" value="${todayISO()}">
     <label>Note (optional)</label>
@@ -907,7 +885,7 @@ function openPaymentModal(custId, isClose){
     const date = document.getElementById('m_date').value;
     const note = document.getElementById('m_note').value.trim();
     if (!amount || amount <= 0 || !date){ showToast('Enter a valid amount and date'); return; }
-    if (date < c.loanDate){ showToast('Payment date cannot be before the loan date'); return; }
+    if (date < c.loanDate || (c.topups||[]).some(t=>t.date>date) || (c.payments||[]).some(p=>p.date>date)){ showToast('Payment date must not be before the loan or after a later transaction'); return; }
     c.payments = c.payments || [];
     c.payments.push({id: uid(), amount, date, note});
     const newLedger = computeLedger(c, date);
@@ -944,37 +922,62 @@ function openConfirm(message, onYes){
 
 /* ---------- Settings ---------- */
 function renderSettings(){
-  document.getElementById('s_shopname').value = state.settings.shopName;
-  document.getElementById('s_defaultrate').value = state.settings.defaultRate;
+  document.getElementById('s_shopname').value = state.settings.shopName || '';
+  document.getElementById('s_defaultrate').value = state.settings.defaultRate ?? 2;
+  document.getElementById('s_interestmode').value = state.settings.interestMode || 'started_months';
 }
 document.getElementById('saveSettings').addEventListener('click', () => {
   state.settings.shopName = document.getElementById('s_shopname').value.trim() || 'My Loan Register';
-  state.settings.defaultRate = parseFloat(document.getElementById('s_defaultrate').value) || 0;
+  const rateInput=document.getElementById('s_defaultrate').value, defaultRate=Number(rateInput);
+  if(rateInput.trim()===''||!Number.isFinite(defaultRate)||defaultRate<0){showToast('Enter a valid default interest rate');return;}
+  state.settings.defaultRate=defaultRate;
+  state.settings.interestMode=document.getElementById('s_interestmode').value;
   saveSettings();
   showToast('Settings saved');
   updateHeader(state.currentScreen);
 });
 document.getElementById('exportBtn').addEventListener('click', exportBackup);
-document.getElementById('importBtn').addEventListener('click', () => document.getElementById('importFile').click());
-document.getElementById('importFile').addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    try{
-      const data = JSON.parse(reader.result);
-      openConfirm('Import will replace all current data on this phone. Continue?', () => {
-        state.customers = data.customers || [];
-        state.settings = Object.assign(state.settings, data.settings || {});
-        saveCustomers(); saveSettings();
-        showToast('Backup imported');
-        renderAll();
-      });
-    }catch(err){ showToast('Invalid backup file'); }
-  };
-  reader.readAsText(file);
-  e.target.value = '';
-});
+document.getElementById('importBtn').addEventListener('click',()=>document.getElementById('importFile').click());
+document.getElementById('importFile').addEventListener('change',handleImportFile);
+function validateBackup(data){
+ if(!data||typeof data!=='object'||!Array.isArray(data.customers))throw Error('Backup must contain a customers array.');
+ const customers=data.customers.map((c,i)=>{
+  if(!c||typeof c!=='object'||!String(c.name||'').trim()||!String(c.item||'').trim())throw Error('Customer record '+(i+1)+' is missing a name or security item.');
+  const loanAmount=Number(c.loanAmount),rate=Number(c.rate);
+  if(!Number.isFinite(loanAmount)||loanAmount<0||!Number.isFinite(rate)||rate<0||!/^\d{4}-\d{2}-\d{2}$/.test(String(c.loanDate||'')))throw Error('Customer record '+(i+1)+' has invalid loan data.');
+  return {...c,id:String(c.id||uid()),name:String(c.name).trim(),item:String(c.item).trim(),phone:String(c.phone||''),notes:String(c.notes||''),loanAmount,rate,
+   topups:Array.isArray(c.topups)?c.topups.filter(t=>t&&Number(t.amount)>0&&/^\d{4}-\d{2}-\d{2}$/.test(String(t.date||''))).map(t=>({...t,id:String(t.id||uid()),amount:Number(t.amount),date:t.date,note:String(t.note||'')})):[],
+   payments:Array.isArray(c.payments)?c.payments.filter(p=>p&&Number(p.amount)>0&&/^\d{4}-\d{2}-\d{2}$/.test(String(p.date||''))).map(p=>({...p,id:String(p.id||uid()),amount:Number(p.amount),date:p.date,note:String(p.note||'')})):[],
+   status:c.status==='closed'?'closed':'active'};
+ });
+ const s=data.settings&&typeof data.settings==='object'?data.settings:{};
+ return {customers,settings:{shopName:String(s.shopName||'My Loan Register'),defaultRate:Number.isFinite(Number(s.defaultRate))&&Number(s.defaultRate)>=0?Number(s.defaultRate):2,interestMode:['started_months','first_full_then_accurate','daily'].includes(s.interestMode)?s.interestMode:'started_months'}};
+}
+function handleImportFile(e){
+ const file=e.target.files&&e.target.files[0];if(!file)return;e.target.value='';
+ if(file.size>20*1024*1024){showToast('Backup is too large (maximum 20 MB)');return;}
+ const reader=new FileReader();reader.onerror=()=>showToast('Could not read backup file');
+ reader.onload=()=>{let backup;try{backup=validateBackup(JSON.parse(reader.result));}catch(err){showToast(err.message||'Invalid backup file');return;}
+  openModal(\`<h3>Restore backup</h3><p style="font-size:14px;line-height:1.5">Found <strong>\${backup.customers.length}</strong> customer records. Choose how to restore them.</p>
+   <div class="btn-row"><button class="btn btn-secondary" id="m_cancelImport">Cancel</button><button class="btn btn-secondary" id="m_mergeImport">Merge</button></div>
+   <div class="btn-row"><button class="btn btn-primary" id="m_replaceImport">Replace all current records</button></div>
+   <p class="helper">Merge keeps current records and adds non-duplicate backup records. Replace overwrites current records.</p>\`);
+  document.getElementById('m_cancelImport').onclick=closeModal;
+  document.getElementById('m_replaceImport').onclick=()=>applyBackup(backup,'replace');
+  document.getElementById('m_mergeImport').onclick=()=>applyBackup(backup,'merge');
+ };reader.readAsText(file);
+}
+function applyBackup(backup,mode){
+ if(mode==='replace')state.customers=backup.customers;
+ else{
+  const ids=new Set(state.customers.map(c=>String(c.id))),keys=new Set(state.customers.map(c=>[c.name,c.phone,c.loanDate,c.loanAmount,c.item].join('|').toLowerCase())),adds=[];
+  backup.customers.forEach(c=>{const key=[c.name,c.phone,c.loanDate,c.loanAmount,c.item].join('|').toLowerCase();if(keys.has(key))return;const n={...c};if(ids.has(String(n.id)))n.id=uid();ids.add(String(n.id));keys.add(key);adds.push(n);});
+  state.customers=state.customers.concat(adds);
+ }
+ state.settings={...state.settings,...backup.settings};
+ try{saveCustomers();saveSettings();}catch(err){showToast('Could not save restored data — check phone storage');return;}
+ closeModal();renderAll();showToast(mode==='replace'?'Backup restored':'Backup merged');
+}
 
 /* ---------- Master render / boot ---------- */
 function renderAll(){
@@ -1018,7 +1021,8 @@ function setupNativeBackButton(){
       return;
     }
     if (state.currentScreen !== 'home'){
-      history.back();
+      if (history.state && history.state.screen && history.state.screen !== 'home') history.back();
+      else showScreen('home');
       return;
     }
     openConfirm('Exit Swarna Ledger?', () => {
@@ -1032,45 +1036,19 @@ function setupNativeBackButton(){
 // Downloads, Google Drive, WhatsApp, email, etc. Falls back to a normal
 // browser download if this file is ever opened outside the app.
 async function exportBackup(){
-  const data = JSON.stringify({customers: state.customers, settings: state.settings}, null, 2);
-  const shopSlug = (state.settings.shopName || 'MyShop')
-    .trim().replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'MyShop';
-  const filename = `SwarnaLedger-Backup-${shopSlug}-${todayISO()}.json`;
-
-  if (isNativeApp() && window.Capacitor.Plugins.Filesystem){
-    try{
-      const { Filesystem, Share } = window.Capacitor.Plugins;
-      const result = await Filesystem.writeFile({
-        path: filename,
-        data: data,
-        directory: 'CACHE',
-        encoding: 'utf8'
-      });
-      if (Share){
-        await Share.share({
-          title: 'Swarna Ledger Backup',
-          text: 'Loan register backup file — ' + filename,
-          url: result.uri,
-          dialogTitle: 'Save or share your backup'
-        });
-        showToast('Backup ready to save or share');
-      } else {
-        showToast('Backup saved: ' + filename);
-      }
-    }catch(err){
-      showToast('Export failed — please try again');
-    }
-    return;
-  }
-
-  // Browser fallback (only used if this file is opened outside the app)
-  const blob = new Blob([data], {type:'application/json'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  showToast('Backup file downloaded: ' + filename);
+ const data=JSON.stringify({app:'Swarna Ledger',version:2,exportedAt:new Date().toISOString(),customers:state.customers,settings:state.settings},null,2);
+ const slug=(state.settings.shopName||'MyShop').trim().replace(/[^a-zA-Z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'MyShop',filename=\`SwarnaLedger-Backup-\${slug}-\${todayISO()}.json\`;
+ let nativeFailed=false;
+ if(isNativeApp()&&window.Capacitor.Plugins.Filesystem){
+  try{const {Filesystem,Share}=window.Capacitor.Plugins;const result=await Filesystem.writeFile({path:filename,data,directory:'CACHE',encoding:'utf8'});
+   if(Share&&result&&result.uri){await Share.share({title:'Swarna Ledger Backup',text:'Backup file: '+filename,url:result.uri,dialogTitle:'Save or share your backup'});showToast('Backup ready to save or share');return;}
+   nativeFailed=true;
+  }catch(err){nativeFailed=true;}
+ }
+ try{const blob=new Blob([data],{type:'application/json;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+  a.href=url;a.download=filename;a.style.display='none';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
+  showToast(nativeFailed?'Backup downloaded (share was unavailable)':'Backup downloaded');
+ }catch(err){showToast('Export failed. Please try again.');}
 }
 </script>
 </body>
