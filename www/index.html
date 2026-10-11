@@ -449,18 +449,18 @@ function computeLedger(cust,asOf){
   asOf=asOf||todayISO();
   const mode=state.settings.interestMode||'started_months';
   const events=[{type:'loan',amount:Number(cust.loanAmount)||0,date:cust.loanDate,note:'Loan issued',id:'loan'}];
-  (cust.topups||[]).forEach(t=>events.push({type:'topup',amount:Number(t.amount)||0,date:t.date,note:t.note||'',id:t.id}));
+  (cust.topups||[]).forEach(t=>events.push({type:'topup',amount:Number(t.amount)||0,rate:Number.isFinite(Number(t.rate))?Number(t.rate):Number(cust.rate)||0,date:t.date,note:t.note||'',id:t.id}));
   (cust.payments||[]).forEach(p=>events.push({type:'payment',amount:Number(p.amount)||0,date:p.date,note:p.note||'',id:p.id}));
   const order={loan:0,topup:1,payment:2};
   const applicableEvents=events.filter(ev=>ev.date<=asOf);
   applicableEvents.sort((a,b)=>a.date.localeCompare(b.date)||order[a.type]-order[b.type]);
   events.length=0;events.push(...applicableEvents);
   let lots=[],carryInterest=0,lastDate=null;const rows=[];const rate=Math.max(0,Number(cust.rate)||0)/100;
-  function accrueTo(date){lots.forEach(lot=>{const factor=interestFactor(lot.startDate,date,mode);const delta=Math.max(0,factor-lot.accruedFactor);if(delta>0&&lot.principal>0)carryInterest+=lot.principal*rate*delta;lot.accruedFactor=Math.max(lot.accruedFactor,factor);});}
+  function accrueTo(date){lots.forEach(lot=>{const factor=interestFactor(lot.startDate,date,mode);const delta=Math.max(0,factor-lot.accruedFactor);if(delta>0&&lot.principal>0)carryInterest+=lot.principal*(Math.max(0,Number(lot.rate))||0)/100*delta;lot.accruedFactor=Math.max(lot.accruedFactor,factor);});}
   function principalTotal(){return lots.reduce((sum,lot)=>sum+lot.principal,0);}
   function reducePrincipal(amount){let rem=amount;lots.sort((a,b)=>a.startDate.localeCompare(b.startDate));for(const lot of lots){if(rem<=0.000001)break;const n=Math.min(lot.principal,rem);lot.principal-=n;rem-=n;}lots=lots.filter(l=>l.principal>0.000001);return amount-rem;}
   events.forEach(ev=>{if(lastDate!==null&&ev.date>lastDate)accrueTo(ev.date);lastDate=ev.date;
-    if(ev.type==='loan'||ev.type==='topup'){lots.push({principal:ev.amount,startDate:ev.date,accruedFactor:0});rows.push({...ev,principalAfter:principalTotal(),interestPaid:0,principalPaid:0});}
+    if(ev.type==='loan'||ev.type==='topup'){lots.push({principal:ev.amount,rate:ev.type==='topup'?ev.rate:(Number(cust.rate)||0),startDate:ev.date,accruedFactor:0});rows.push({...ev,principalAfter:principalTotal(),interestPaid:0,principalPaid:0});}
     else{let payment=ev.amount;const interestPaid=Math.min(payment,carryInterest);carryInterest=Math.max(0,carryInterest-interestPaid);payment-=interestPaid;const principalPaid=reducePrincipal(payment);rows.push({...ev,interestPaid,principalPaid,principalAfter:principalTotal()});}
   });
   if(lastDate!==null&&asOf>lastDate)accrueTo(asOf);
@@ -733,7 +733,7 @@ function ledgerRowHtml(r){
     tag = '<span class="tag loan">Loan</span>'; desc = 'Loan issued';
     amtStr = '+' + fmtMoney(r.amount); amtColor = 'var(--ink)';
   } else if (r.type === 'topup'){
-    tag = '<span class="tag topup">Top-up</span>'; desc = r.note || 'Top-up amount';
+    tag = '<span class="tag topup">Top-up</span>'; desc = (r.note || 'Top-up amount') + ' (' + (Number.isFinite(Number(r.rate)) ? Number(r.rate) : 0) + '%/mo)';
     amtStr = '+' + fmtMoney(r.amount); amtColor = 'var(--brass)';
   } else {
     tag = '<span class="tag payment">Payment</span>';
@@ -848,6 +848,9 @@ function openTopupModal(custId){
     <h3>Add top-up</h3>
     <label>Top-up amount (₹)</label>
     <input type="number" id="m_amount" min="0.01" step="0.01">
+    <label>Top-up interest rate (% / month)</label>
+    <input type="number" id="m_rate" min="0" step="0.1" value="${(state.customers.find(x=>x.id===custId)||{}).rate||0}">
+    <p class="helper">Defaults to the main loan rate. Change it if this top-up has a different rate.</p>
     <label>Date</label>
     <input type="date" id="m_date" value="${todayISO()}">
     <label>Note (optional)</label>
@@ -860,13 +863,14 @@ function openTopupModal(custId){
   document.getElementById('m_cancel').onclick = closeModal;
   document.getElementById('m_save').onclick = () => {
     const amount = parseFloat(document.getElementById('m_amount').value);
+    const rate = parseFloat(document.getElementById('m_rate').value);
     const date = document.getElementById('m_date').value;
     const note = document.getElementById('m_note').value.trim();
     const c = state.customers.find(x => x.id === custId);
-    if (!amount || amount <= 0 || !date){ showToast('Enter a valid amount and date'); return; }
+    if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(rate) || rate < 0 || !date){ showToast('Enter a valid top-up amount, rate and date'); return; }
     if (date < c.loanDate || (c.topups||[]).some(t=>t.date>date) || (c.payments||[]).some(p=>p.date>date)){ showToast('Top-up date must not be before the loan or after a later transaction'); return; }
     c.topups = c.topups || [];
-    c.topups.push({id: uid(), amount, date, note});
+    c.topups.push({id: uid(), amount, rate, date, note});
     saveCustomers();
     closeModal();
     showToast('Top-up added');
@@ -961,7 +965,7 @@ function validateBackup(data){
   const loanAmount=Number(c.loanAmount),rate=Number(c.rate);
   if(!Number.isFinite(loanAmount)||loanAmount<0||!Number.isFinite(rate)||rate<0||!/^\d{4}-\d{2}-\d{2}$/.test(String(c.loanDate||'')))throw Error('Customer record '+(i+1)+' has invalid loan data.');
   return {...c,id:String(c.id||uid()),name:String(c.name).trim(),item:String(c.item).trim(),phone:String(c.phone||''),notes:String(c.notes||''),loanAmount,rate,
-   topups:Array.isArray(c.topups)?c.topups.filter(t=>t&&Number(t.amount)>0&&/^\d{4}-\d{2}-\d{2}$/.test(String(t.date||''))).map(t=>({...t,id:String(t.id||uid()),amount:Number(t.amount),date:t.date,note:String(t.note||'')})):[],
+   topups:Array.isArray(c.topups)?c.topups.filter(t=>t&&Number(t.amount)>0&&/^\d{4}-\d{2}-\d{2}$/.test(String(t.date||''))).map(t=>({...t,id:String(t.id||uid()),amount:Number(t.amount),rate:Number.isFinite(Number(t.rate))&&Number(t.rate)>=0?Number(t.rate):rate,date:t.date,note:String(t.note||'')})):[],
    payments:Array.isArray(c.payments)?c.payments.filter(p=>p&&Number(p.amount)>0&&/^\d{4}-\d{2}-\d{2}$/.test(String(p.date||''))).map(p=>({...p,id:String(p.id||uid()),amount:Number(p.amount),date:p.date,note:String(p.note||'')})):[],
    status:c.status==='closed'?'closed':'active'};
  });
