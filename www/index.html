@@ -422,6 +422,15 @@ function daysBetween(iso1, iso2){
   const d1 = new Date(iso1+'T00:00:00'), d2 = new Date(iso2+'T00:00:00');
   return Math.round((d2 - d1) / 86400000);
 }
+function calendarDuration(startISO,endISO){
+  if(!startISO||!endISO||endISO<startISO)return {months:0,days:0};
+  const start=new Date(startISO+'T00:00:00'),end=new Date(endISO+'T00:00:00');
+  let months=(end.getFullYear()-start.getFullYear())*12+(end.getMonth()-start.getMonth());
+  const anchor=new Date(start);anchor.setMonth(anchor.getMonth()+months);
+  if(anchor>end){months--;anchor.setTime(start.getTime());anchor.setMonth(anchor.getMonth()+months);}
+  const days=Math.max(0,Math.round((end-anchor)/86400000));
+  return {months,days};
+}
 function isSameDay(iso1, iso2){ return iso1 === iso2; }
 
 // Core interest-billing rule:
@@ -666,8 +675,9 @@ function renderDetail(){
   const l = computeLedger(c);
   updateHeader('detail');
 
-  const months = Math.floor(l.elapsedDays / 30);
-  const days = l.elapsedDays % 30;
+  const duration = calendarDuration(c.loanDate, todayISO());
+  const months = duration.months;
+  const days = duration.days;
 
   el.innerHTML = `
     <div class="card">
@@ -884,8 +894,10 @@ function openPaymentModal(custId, isClose){
     const amount = parseFloat(document.getElementById('m_amount').value);
     const date = document.getElementById('m_date').value;
     const note = document.getElementById('m_note').value.trim();
-    if (!amount || amount <= 0 || !date){ showToast('Enter a valid amount and date'); return; }
+    if (!Number.isFinite(amount) || amount <= 0 || !date){ showToast('Enter a valid amount and date'); return; }
     if (date < c.loanDate || (c.topups||[]).some(t=>t.date>date) || (c.payments||[]).some(p=>p.date>date)){ showToast('Payment date must not be before the loan or after a later transaction'); return; }
+    const payableOnDate=computeLedger(c,date).totalPayable;
+    if (amount > payableOnDate + 0.005){ showToast('Payment is greater than the total due on that date'); return; }
     c.payments = c.payments || [];
     c.payments.push({id: uid(), amount, date, note});
     const newLedger = computeLedger(c, date);
