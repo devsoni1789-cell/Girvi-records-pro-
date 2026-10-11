@@ -40,14 +40,20 @@ jobs:
 
       - name: Install Capacitor packages
         run: |
-          npm install \
-            @capacitor/core@latest \
-            @capacitor/cli@latest \
-            @capacitor/android@latest \
-            @capacitor/app@latest \
-            @capacitor/filesystem@latest \
-            @capacitor/share@latest \
-            @capacitor/assets@latest
+          npm install --save-exact \
+            @capacitor/core@7 \
+            @capacitor/cli@7 \
+            @capacitor/android@7 \
+            @capacitor/app@7 \
+            @capacitor/filesystem@7 \
+            @capacitor/share@7 \
+            @capacitor/assets@3
+
+      - name: Validate web app and Capacitor config
+        run: |
+          test -f capacitor.config.json
+          test -f www/index.html
+          node -e "const c=require('./capacitor.config.json'); if(c.webDir!=='www') throw new Error('Capacitor webDir must be www')"
 
       - name: Create native Android project
         run: npx cap add android
