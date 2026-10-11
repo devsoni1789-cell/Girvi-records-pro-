@@ -803,8 +803,8 @@ document.getElementById('custForm').addEventListener('submit', (e) => {
   const date = document.getElementById('f_date').value;
   const notes = document.getElementById('f_notes').value.trim();
 
-  if (!name || !item || !Number.isFinite(amount) || amount <= 0 || !Number.isFinite(rate) || rate < 0 || !date){
-    showToast('Enter a valid name, item, loan amount and interest rate');
+  if (!name || !item || !Number.isFinite(amount) || amount <= 0 || !Number.isFinite(rate) || rate < 0 || !date || date > todayISO()){
+    showToast('Enter a valid name, item, loan amount, interest rate and date (not in the future)');
     return;
   }
 
@@ -874,7 +874,7 @@ function openTopupModal(custId){
     const note = document.getElementById('m_note').value.trim();
     const c = state.customers.find(x => x.id === custId);
     if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(rate) || rate < 0 || !date){ showToast('Enter a valid top-up amount, rate and date'); return; }
-    if (date < c.loanDate || (c.topups||[]).some(t=>t.date>date) || (c.payments||[]).some(p=>p.date>date)){ showToast('Top-up date must not be before the loan or after a later transaction'); return; }
+    if (date < c.loanDate || date > todayISO()){ showToast('Top-up date must be between the loan date and today'); return; }
     c.topups = c.topups || [];
     c.topups.push({id: uid(), amount, rate, date, note});
     saveCustomers();
@@ -908,7 +908,7 @@ function openPaymentModal(custId, isClose){
     const date = document.getElementById('m_date').value;
     const note = document.getElementById('m_note').value.trim();
     if (!Number.isFinite(amount) || amount <= 0 || !date){ showToast('Enter a valid amount and date'); return; }
-    if (date < c.loanDate || (c.topups||[]).some(t=>t.date>date) || (c.payments||[]).some(p=>p.date>date)){ showToast('Payment date must not be before the loan or after a later transaction'); return; }
+    if (date < c.loanDate || date > todayISO()){ showToast('Payment date must be between the loan date and today'); return; }
     const payableOnDate=computeLedger(c,date).totalPayable;
     if (amount > payableOnDate + 0.005){ showToast('Payment is greater than the total due on that date'); return; }
     c.payments = c.payments || [];
